@@ -317,10 +317,10 @@ if __name__ == "__main__":
     Tk().withdraw()
     freeze_support()
     print("Welcome to ", end="")
-    clrprint("Operator Tool", clr='m')
+    clrprint("Operator Backup", clr='m')
 
     print("Choose a starting folder")
-    src_dir = './data'#folder_dialog()
+    src_dir = folder_dialog()
     print(src_dir)
 
     if src_dir == "":
@@ -330,13 +330,11 @@ if __name__ == "__main__":
     # dst_dir = folder_dialog()
     # print(dst_dir)
 
-    temp_path = "./originals/AATemplate2022.xlsx"
+    print("Select the template file")
+    temp_path = file_dialog()
 
-    # if dst_dir == "":
-    #     sys.exit()
-
-    # if template == "":
-    #     sys.exit()
+    if temp_path == "":
+        sys.exit()
 
     try:
         restore_focus()
