@@ -294,7 +294,7 @@ def extract_years(path, year, dst_folder, temp):
 
 def extract_all(src, year, pth):
     start_time = datetime.datetime.now()
-    dst_folder = f'Archive{year - 1}'
+    dst_folder = os.path.join(src, f'Archive{year - 1}')
     if not os.path.exists(dst_folder):
         os.makedirs(dst_folder)
 
@@ -331,7 +331,7 @@ if __name__ == "__main__":
     # print(dst_dir)
 
     print("Select the template file")
-    temp_path = file_dialog()
+    temp_path = file_dialog([("Excel files", ".xlsx")])
 
     if temp_path == "":
         sys.exit()
