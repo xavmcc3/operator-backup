@@ -2,6 +2,7 @@ from multiprocessing import Process, freeze_support
 from openpyxl.formula.translate import Translator
 from tkinter.filedialog import askopenfilename
 from tkinter.filedialog import askdirectory
+from openpyxl.styles import NamedStyle
 from tkinter import Tk
 import pandas as pd
 import datetime
@@ -12,6 +13,7 @@ import re
 from clrprint import clrprint
 from pathlib import Path
 from io import BytesIO
+from copy import copy
 import subprocess
 import openpyxl
 import shutil
@@ -79,6 +81,50 @@ def wb_from_bytes(path_bytes):
 def wb_data_from_bytes(path_bytes):
     return openpyxl.load_workbook(path_bytes, data_only=True)
 
+def copy_sheet(source_sheet, target_sheet):
+    copy_cells(source_sheet, target_sheet)
+    copy_sheet_attributes(source_sheet, target_sheet)
+
+def copy_sheet_attributes(source_sheet, target_sheet):
+    target_sheet.sheet_format = copy(source_sheet.sheet_format)
+    target_sheet.sheet_properties = copy(source_sheet.sheet_properties)
+    target_sheet.merged_cells = copy(source_sheet.merged_cells)
+    target_sheet.page_margins = copy(source_sheet.page_margins)
+    target_sheet.freeze_panes = copy(source_sheet.freeze_panes)
+
+    # set row dimensions
+    # So you cannot copy the row_dimensions attribute. Does not work (because of meta data in the attribute I think). So we copy every row's row_dimensions. That seems to work.
+    target_sheet.column_dimensions = source_sheet.column_dimensions
+    target_sheet.row_dimensions = source_sheet.row_dimensions
+
+    # set specific column width and hidden property
+    # we cannot copy the entire column_dimensions attribute so we copy selected attributes
+    for key, value in source_sheet.column_dimensions.items():
+        target_sheet.column_dimensions[key].min = copy(source_sheet.column_dimensions[key].min)   # Excel actually groups multiple columns under 1 key. Use the min max attribute to also group the columns in the targetSheet
+        target_sheet.column_dimensions[key].max = copy(source_sheet.column_dimensions[key].max)  # https://stackoverflow.com/questions/36417278/openpyxl-can-not-read-consecutive-hidden-columns discussed the issue. Note that this is also the case for the width, not onl;y the hidden property
+        target_sheet.column_dimensions[key].width = copy(source_sheet.column_dimensions[key].width) # set width for every column
+        target_sheet.column_dimensions[key].hidden = copy(source_sheet.column_dimensions[key].hidden)
+
+def copy_cells(source_sheet, target_sheet):
+    for (row, col), source_cell in source_sheet._cells.items():
+        target_cell = target_sheet.cell(column=col, row=row)
+
+        target_cell._value = source_cell._value
+        target_cell.data_type = source_cell.data_type
+
+        if source_cell.has_style:
+            target_cell.font = copy(source_cell.font)
+            target_cell.border = copy(source_cell.border)
+            target_cell.fill = copy(source_cell.fill)
+            target_cell.number_format = copy(source_cell.number_format)
+            target_cell.protection = copy(source_cell.protection)
+            target_cell.alignment = copy(source_cell.alignment)
+
+        if source_cell.hyperlink:
+            target_cell._hyperlink = copy(source_cell.hyperlink)
+
+        if source_cell.comment:
+            target_cell.comment = copy(source_cell.comment)
 
 def create_from_template(template_bytes, name, append, dst_folder, use_name=True):
     dst_path = f"{name}{append}.xlsx"
@@ -167,27 +213,14 @@ def archive_before(file_bytes, name, year, dest):
     archive_wb.save(os.path.abspath(dest))
     archive_wb.close()
 
-def remove_before(file_bytes, name, year, dest):
+def remove_before(file_bytes, name, year, dest, temp: openpyxl.Workbook):
     clrprint("Cleaning ", name, " before ", year, "...", sep="", clr="w,y,w,m,w")
     year_date = datetime.datetime(year, 1, 1)
-
-    formulas = {}
-    formula_wb = wb_from_bytes(file_bytes)
-    formula_ws = formula_wb.get_sheet_by_name(formula_wb.sheetnames[0])
-
-    temp_sheet = formula_wb.create_sheet(f'', index=0)
-    clrprint("Getting formulas in ", name, "...", sep="", clr="w,y,w")
-    for cell in formula_ws[2]:
-        if cell.column > 11 or not str(cell.value).startswith("="):
-            continue
-        formulas[cell.column] = (cell.value, cell.coordinate)
-
-    print("Add these:", formulas)
-    # TODO add these: formulas
 
     current_wb = wb_data_from_bytes(file_bytes)
     current_ws = current_wb.get_sheet_by_name(current_wb.sheetnames[0])
     clrprint("Getting rows in ", name, "...", sep="", clr="w,y,w")
+    temp_sheet = current_wb.create_sheet(f'', index=0)
 
     blank = 0
     row_count = 1
@@ -207,84 +240,71 @@ def remove_before(file_bytes, name, year, dest):
             continue
         copy_row(row, row_count, temp_sheet)
         row_count += 1
-    
-    formula_wb.remove_sheet(formula_ws)
-    temp_sheet.title = formula_ws.title
 
-    temp_sheet.column_dimensions = formula_ws.column_dimensions
-    temp_sheet.row_dimensions = formula_ws.row_dimensions
+    formulas = {}
+    forms_ws = temp.get_sheet_by_name(temp.sheetnames[0])
+    for col in forms_ws.iter_cols(min_row=2, max_row=2, min_col=1, max_col=11):
+        for cell in col:
+            if not str(cell.value).startswith('='):
+                continue
+
+            formulas[cell.column] = (cell.value, str(cell.column_letter) + str(cell.row))
+    
+    min_cap = temp_sheet.max_row
+    style = NamedStyle(name='custom_datetime', number_format='MM/DD/YY h:mm AM/PM')
+    for row in range(2, temp_sheet.max_row + 1):
+        temp_sheet[f"F{row}"].style = style
+    for row in range(min_cap + 1, max(5000, (temp_sheet.max_row + 1))):
+        for column in formulas.keys():
+            cell_idx = f"{openpyxl.utils.cell.get_column_letter(column)}{row}"
+            try:
+                temp_sheet[cell_idx] = Translator(*formulas[column]).translate_formula(cell_idx)
+            except Exception as e:
+                print(e)
+            if column == 6:
+                temp_sheet[cell_idx].style = style
+
+    current_wb.remove_sheet(current_wb.get_sheet_by_name(current_wb.sheetnames[-1]))
+    temp_sheet.freeze_panes = temp_sheet['A2']
+    current_wb.remove_sheet(current_ws)
+    temp_sheet.title = current_ws.title
+
+    stats_ws = temp.get_sheet_by_name(temp.sheetnames[1])
+    temp_stats = current_wb.create_sheet(f'', index=1)
+    temp_stats.title = stats_ws.title
+    copy_sheet(stats_ws, temp_stats)
+
+    temp_sheet.column_dimensions = current_ws.column_dimensions
+    temp_sheet.row_dimensions = current_ws.row_dimensions
+
+    temp_stats.column_dimensions = stats_ws.column_dimensions
+    temp_stats.row_dimensions = stats_ws.row_dimensions
 
     clrprint("Saving ", dest, "...", sep="", clr="w,m,w")
     current_wb.save(os.path.abspath(dest))
     current_wb.close()
 
-def extract_years(path, year, dst_folder, use_name=True):
+def extract_years(path, year, dst_folder, temp):
     name = get_name_from_file(path)
     clrprint("Loading ", name, "...", sep="", clr='w,y,w')
 
     file_bytes = load_path_bytes(path)
-    #archive_before(file_bytes, name, year, f"{dst_folder}/{name}{year - 1}.xlsx")
-    remove_before(file_bytes, name, year, f"{dst_folder}/{name}{year}.xlsx")
+    archive_before(file_bytes, name, year, f"{dst_folder}/{name}{year - 1}.xlsx")
+    remove_before(file_bytes, name, year, path, temp)
 
-    return
-    clrprint("Updating ", name, " to ", year, "...", sep="", clr="w,y,w,m,w")
-
-    current_wb = wb_data_from_bytes(file_bytes)
-    current_ws = current_wb.get_sheet_by_name(current_wb.sheetnames[0])
-    for row in current_ws.iter_rows(min_col=1, max_col=6, min_row=2):
-        try:
-            date = pd.to_datetime(row[5].value)
-        except (IndexError, pd._libs.tslibs.parsing.DateParseError):
-            continue
-        if date is None:
-            continue
-        if date < year_date:
-            current_ws.delete_rows(row[0].row, 1)
-            clrprint("Deleted", row[0].row, "from", name, clr="w,r,w,y")
-    clrprint("Saving ", path.replace('\\', '/'), "...", sep="", clr='w,b,w')
-    # current_wb.save(path)
-    current_wb.close()
-
-    # old_wb = wb_from_bytes(file_bytes)
-    # old_wb.close()
-    return
-    dst_path = f"{name}{append}.xlsx"
-    final_path = os.path.join(os.path.abspath(dst_folder), dst_path)
-
-    print(f"Loading ", end="")
-    clrprint(name, end="", clr='y')
-    print("...")
-
-    template = wb_from_bytes(template_bytes)
-
-    print(f"Creating ", end="")
-    clrprint(dst_path, end="", clr='m')
-    print("...")
-
-    ws = template[template.sheetnames[0]]
-    for col in ws.iter_cols():
-        if str(col[0].value).lower() == "name":
-            col[0].value = name if use_name else "Name"
-            break
-    
-    #ws.column_dimensions.group(start='H', end='K', hidden=True)
-
-    template.save(final_path)
-    template.close()
-
-    print("Created ", end="")
-    clrprint(final_path, clr='g')
-
-def extract_all(src, year):
+def extract_all(src, year, pth):
     start_time = datetime.datetime.now()
-    dst_folder = f'Archive'#{year}'
+    dst_folder = f'Archive{year - 1}'
     if not os.path.exists(dst_folder):
         os.makedirs(dst_folder)
+
+    clrprint("Loading ", pth, "...", sep="", clr="w,y,w")
+    temp_wb = openpyxl.load_workbook(pth)
     
     processes = []
     for file in os.listdir(src):
         if file_is_valid(file):
-            p = Process(target=extract_years, args=(os.path.join(src, file), year, dst_folder))
+            p = Process(target=extract_years, args=(os.path.join(src, file), year, dst_folder, temp_wb))
             processes.append(p)
             p.start()
 
@@ -310,6 +330,8 @@ if __name__ == "__main__":
     # dst_dir = folder_dialog()
     # print(dst_dir)
 
+    temp_path = "./originals/AATemplate2022.xlsx"
+
     # if dst_dir == "":
     #     sys.exit()
 
@@ -328,7 +350,7 @@ if __name__ == "__main__":
     #     empty_dir(dst_dir)
 
     try:
-        result = extract_all(src_dir, year)
+        result = extract_all(src_dir, year, temp_path)
     except KeyboardInterrupt:
         print("Program terminated, new files might be corrupted")
     #os.startfile(result)
