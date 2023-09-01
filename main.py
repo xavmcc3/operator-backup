@@ -338,7 +338,7 @@ if __name__ == "__main__":
 
     try:
         restore_focus()
-        year = int('balls')#input("Input a year "))
+        year = int(input("Input a year "))
     except ValueError as e:
         clrprint("Error, defaulting to current year", clr="r")
         year = datetime.date.today().year
